@@ -1,0 +1,4 @@
+# Belt-and-suspenders: if anyone accidentally copies judge/ into this repo,
+# git will refuse to export it in archives. (Real protection: don't copy it.)
+judge/ export-ignore
+judge/** export-ignore
