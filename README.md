@@ -48,14 +48,14 @@ is to make it *good* at your chosen problem. Some directions:
 The judge reads your **code** and your **PITCH.md** — not your runtime output.
 Show your thinking in the code.
 
-## How you're scored (1–10 each)
+## How you're scored (0–100 each, average wins)
 
-| Criterion | Judge persona |
+| Criterion | Judge lens |
 |---|---|
-| **Impact** — does this actually help the learner? | The Educator |
-| **Architecture** — smart use of agent primitives (tools, memory, subagents, model choice) | The Engineer |
-| **Scalability** — would this work for 1M students without bankrupting IU? | The Economist |
-| **Creativity** — would IU actually ship this? | All three |
+| **Impact** — does a real learner end up better off? Be specific about who and how. | The Educator |
+| **Architecture** — the agent-design choices *you* control: tool definitions, system prompt, memory, model selection, subagent topology. Managed Agents handles the sandbox — don't reinvent it. | The Engineer |
+| **Economics** — cost per learner at scale. Model tier, caching, batching, context discipline. The infra scales for free; the bill doesn't. | The Economist |
+| **Ambition** — does this get *disproportionately better* as models get smarter? Aim where AI is going, not where it is. | The Futurist |
 
 ## Setup
 
