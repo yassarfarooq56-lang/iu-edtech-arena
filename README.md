@@ -10,7 +10,7 @@ entry live on the big screen.
 
 1. Form a team of 2–4. Pick a name.
 2. Clone this repo and branch: `git checkout -b team-<your-name>`
-3. Pick **one** problem from the list below (or bring your own).
+3. Choose an education problem — see below for examples.
 4. Build your agent in `agent/`. Use Claude Code — that's the point.
 5. Fill in `PITCH.md` (≤150 words).
 6. **Push your branch by 16:55.** Last commit before the bell counts.
@@ -18,9 +18,12 @@ entry live on the big screen.
 
 Prizes for the top 3 teams. Claude is the only judge.
 
-## Pick a problem
+## Example problems
 
-| # | Problem | Hint: which primitive shines |
+These are starting points, not a menu — bring your own if you have one. The
+only rule is that it's an **education** problem with a real learner.
+
+| | Example | Hint: which primitive shines |
 |---|---|---|
 | 1 | A tutor that adapts to a dyslexic 12-year-old learning fractions | memory, multi-turn |
 | 2 | Dropout early-warning agent that drafts intervention messages | tool use, structured output |
@@ -30,12 +33,10 @@ Prizes for the top 3 teams. Claude is the only judge.
 | 6 | Accessibility agent: make a physics chapter usable for a blind student | vision → text, tool use |
 | 7 | Curriculum-gap detector: read a student's chat history, find the misconception | long context, reasoning |
 
-Or pitch your own — but it must be an **education** problem.
-
 ## What "build an agent" means
 
 The skeleton in `agent/main.py` is a working-but-useless tutor loop. Your job
-is to make it *good* at your chosen problem. Some directions:
+is to make it *good* at your problem. Some directions:
 
 - Rewrite the system prompt for your learner
 - Add tools (`search_curriculum`, `save_progress`, `send_sms`, …)
@@ -48,7 +49,7 @@ is to make it *good* at your chosen problem. Some directions:
 The judge reads your **code** and your **PITCH.md** — not your runtime output.
 Show your thinking in the code.
 
-## How you're scored (0–100 each, average wins)
+## How you're scored (0–100 each, total out of 400 wins)
 
 | Criterion | Judge lens |
 |---|---|
