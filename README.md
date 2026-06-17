@@ -69,10 +69,3 @@ python agent/main.py   # prove it runs, then start hacking
 ```
 
 Use HTTPS for the remote (port 443) — conference wifi may block SSH.
-
-## Fallback: can't push?
-
-Paste your `PITCH.md` and a gist link into the form on the screen. We'll pull
-it in manually.
-
-Good luck. 🚀
