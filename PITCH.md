@@ -1,7 +1,7 @@
 # Team: <your-team-name>
 
 ## Problem
-<!-- Which problem from README.md (or your own)? Who is the learner? -->
+<!-- What education problem are you solving? Who is the learner? -->
 
 ## Approach
 <!-- One paragraph. What does your agent do, and which primitives
