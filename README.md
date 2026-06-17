@@ -60,13 +60,17 @@ Show your thinking in the code.
 
 ## Setup
 
+Your Anthropic Console org has been loaded with credits for the workshop.
+Create an API key at https://console.anthropic.com/settings/keys, then:
+
 ```sh
 git clone <this-repo>
 cd iu-edtech-arena
 git checkout -b team-<your-name>
 pip install -r agent/requirements.txt
-export ANTHROPIC_API_KEY=<the key on your card>
-python agent/main.py   # prove it runs, then start hacking
+cp agent/.env.example agent/.env   # then paste your key into agent/.env
+python agent/main.py               # prove it runs, then start hacking
 ```
 
-Use HTTPS for the remote (port 443) — conference wifi may block SSH.
+`.env` is git-ignored — your key won't end up in your branch. Use HTTPS for
+the remote (port 443) — conference wifi may block SSH.

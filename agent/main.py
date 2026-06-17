@@ -6,7 +6,12 @@ design obvious.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import anthropic
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).with_name(".env"))
 
 MODEL = "claude-opus-4-8"
 
