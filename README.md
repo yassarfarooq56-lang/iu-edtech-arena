@@ -67,10 +67,13 @@ Create an API key at https://console.anthropic.com/settings/keys, then:
 git clone <this-repo>
 cd iu-edtech-arena
 git checkout -b team-<your-name>
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r agent/requirements.txt
 cp agent/.env.example agent/.env   # then paste your key into agent/.env
 python agent/main.py               # prove it runs, then start hacking
 ```
+
+On Windows, activate with `.venv\Scripts\activate` instead.
 
 `.env` is git-ignored — your key won't end up in your branch. Use HTTPS for
 the remote (port 443) — conference wifi may block SSH.
