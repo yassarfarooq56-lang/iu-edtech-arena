@@ -396,8 +396,8 @@ def handle_tool(client: anthropic.Anthropic, name: str, args: dict) -> str:
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Criterion: {args['criterion']}\n\n"
-                    f"Essay by {args['student_name']}:\n{args['essay_text']}"
+                    f"Criterion: {args.get('criterion', args.get('rubric_criterion', 'General Quality'))}\n\n"
+                    f"Essay by {args.get('student_name', 'Unknown')}:\n{args.get('essay_text', '')}"
                 ),
             }],
         )
