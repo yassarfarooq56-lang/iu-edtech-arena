@@ -24,9 +24,15 @@ TOOLS: list[dict] = [
 ]
 
 
-def run(first_message: str) -> None:
+def run() -> None:
     client = anthropic.Anthropic()
-    history: list[dict] = [{"role": "user", "content": first_message}]
+    history: list[dict] = []
+    print("\n🎓 EdTech Arena starter agent — type a message, empty line to quit.\n")
+
+    user = input("👤 ").strip()
+    if not user:
+        return
+    history.append({"role": "user", "content": user})
 
     while True:
         resp = client.messages.create(
@@ -66,4 +72,4 @@ def handle_tool(name: str, args: dict) -> str:
 
 
 if __name__ == "__main__":
-    run("Hi, I need help with fractions.")
+    run()
