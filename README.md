@@ -3,17 +3,19 @@
 **IU Tech Conference 2026 · Anthropic Workshop · Thu 18 June, 16:00–17:00**
 
 You have one hour, one API key, and Claude Code. Build an AI agent that moves
-the needle on a real education problem. Push your branch. Claude judges every
-entry live on the big screen.
+the needle on a real education problem. Open a PR. Claude judges every entry
+live on the big screen.
 
 ## The rules
 
 1. Form a team of 2–4. Pick a name.
-2. Clone this repo and branch: `git checkout -b team-<your-name>`
+2. **Fork** this repo to your own GitHub, clone your fork, and branch:
+   `git checkout -b team-<your-name>`
 3. Choose an education problem — see below for examples.
 4. Build your agent in `agent/`. Use Claude Code — that's the point.
 5. Fill in `PITCH.md` (≤150 words).
-6. **Push your branch by 16:55.** Last commit before the bell counts.
+6. **Push to your fork and open a PR against this repo by 16:55.** The judge
+   reads your PR's head commit — keep pushing, the PR updates automatically.
 7. Watch the leaderboard.
 
 Prizes for the top 3 teams. Claude is the only judge.
@@ -63,8 +65,11 @@ Show your thinking in the code.
 Your Anthropic Console org has been loaded with credits for the workshop.
 Create an API key at https://console.anthropic.com/settings/keys, then:
 
+1. Hit **Fork** (top-right on this page).
+2. On your laptop:
+
 ```sh
-git clone <this-repo>
+git clone https://github.com/<your-github-user>/iu-edtech-arena
 cd iu-edtech-arena
 git checkout -b team-<your-name>
 python3 -m venv .venv && source .venv/bin/activate
@@ -75,5 +80,16 @@ python agent/main.py               # prove it runs, then start hacking
 
 On Windows, activate with `.venv\Scripts\activate` instead.
 
-`.env` is git-ignored — your key won't end up in your branch. Use HTTPS for
-the remote (port 443) — conference wifi may block SSH.
+3. When you're ready (and again before the bell):
+
+```sh
+git push -u origin team-<your-name>
+gh pr create --repo Adriaan-ANT/iu-edtech-arena --base main \
+  --title "team-<your-name>" --body "see PITCH.md"
+```
+
+No `gh`? Push, then click **Compare & pull request** on your fork's GitHub page.
+The branch must be named `team-<something>` or the judge ignores it.
+
+`.env` is git-ignored — your key won't end up in your PR. Use HTTPS for the
+remote (port 443) — conference wifi may block SSH.
