@@ -33,7 +33,7 @@ def run(first_message: str) -> None:
             model=MODEL,
             max_tokens=2048,
             system=SYSTEM,
-            tools=TOOLS or None,
+            tools=TOOLS,
             thinking={"type": "adaptive"},
             messages=history,
         )
