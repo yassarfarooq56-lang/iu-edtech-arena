@@ -1,15 +1,28 @@
-"""EdTech Arena — Essay Grading Agent (GradeAssist)
+"""EdTech Arena — Adaptive Misconception Debugger
 
-Dual-model architecture: Opus orchestrates the grading workflow and adds
-empathetic framing. Haiku scores each rubric criterion independently —
-isolated scoring prevents halo bias and costs ~$0.001/call.
+A "debugger for student thinking." Finds the exact concept where a
+student's understanding breaks, then provides the minimal intervention
+to fix it.
 
-Flow: load_essay_batch → score_rubric_criterion (×5 per essay, Haiku)
-    → generate_student_feedback (Haiku) → export_grade_summary
+Subagent topology:
+  Orchestrator (Opus) — manages the diagnostic loop
+    ├── Diagnostician (Opus)  — reasons about WHY the student is wrong
+    ├── Probe Generator (Haiku) — generates targeted diagnostic questions
+    ├── Scaffolder (Haiku)    — creates minimal interventions
+    └── Verifier (Haiku)      — checks if misconception was resolved
+
+Memory: persistent cognitive map tracks what each student knows,
+misconceives, and has resolved — across the full session.
+
+Economics: Opus fires only for deep diagnosis (~1 call per misconception).
+Everything else runs on Haiku (~$0.001/call). Context window is managed
+via conversation summarization after 20 turns.
 """
 from __future__ import annotations
 
 import json
+import sys
+import time
 from pathlib import Path
 
 import anthropic
@@ -17,311 +30,464 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).with_name(".env"))
 
+# --- Model routing: Opus for reasoning-about-reasoning, Haiku for everything else ---
 ORCHESTRATOR_MODEL = "claude-opus-4-8"
-SCORER_MODEL = "claude-haiku-4-5"
+FAST_MODEL = "claude-haiku-4-5"
 
+# --- Pedagogically-grounded system prompt ---
 SYSTEM = """\
-You are GradeAssist, an AI teaching assistant that helps teachers grade
-essays efficiently and fairly. You are grounded in evidence-based pedagogy.
+You are MisconceptionDebugger, an AI tutor for university STEM students.
+You don't explain solutions — you diagnose WHY a student is stuck and
+provide the minimum intervention to unblock them.
 
-## Workflow (follow this order)
+## Your diagnostic loop
 
-1. If the teacher wants a custom rubric, call `customize_rubric` first.
-   Otherwise use the default 5-criterion rubric.
-2. Call `load_essay_batch` to get the essays.
-3. For EACH essay, call `score_rubric_criterion` once per criterion.
-   Each call is cheap (~$0.001 on Haiku). Do ALL criteria for one student
-   before moving to the next.
-4. After scoring all criteria for a student, call `generate_student_feedback`
-   to compile a personalized feedback letter.
-5. After ALL students are graded, call `suggest_revision_focus` for each
-   student to give them a single, actionable priority.
-6. Call `export_grade_summary` LAST for a class-wide report.
+1. Listen to the student's problem or answer.
+2. Call `diagnose_misconception` to hypothesize the root cause (uses Opus
+   for deep reasoning about the student's thinking — this is the expensive
+   call, use it deliberately).
+3. Call `generate_probe` to ask a targeted question that confirms or
+   refutes your hypothesis (uses Haiku — cheap, call freely).
+4. Based on the student's response, either:
+   a. Probe again (different angle) if uncertain, OR
+   b. Call `update_cognitive_map` to record the confirmed misconception.
+5. Call `generate_scaffold` to provide the MINIMAL hint that addresses
+   the specific misconception (uses Haiku). Never give the full answer.
+6. Call `verify_understanding` after the student tries again to check
+   if the misconception is resolved (uses Haiku).
+7. Call `update_cognitive_map` again to mark it resolved (or not).
 
-## Pedagogical framework
+You can call `get_cognitive_map` at any time to see the student's full
+knowledge state and tailor your approach.
 
-- Bloom's Taxonomy: note which cognitive level (remember → create) the
-  student is operating at, and nudge them one level up.
-- Growth mindset: use "yet" language — "Your thesis doesn't have specific
-  evidence yet" not "Your thesis lacks evidence."
-- Specificity: quote the student's own words when praising or suggesting
-  changes. Vague feedback ("good job") is not actionable.
-- Fairness: apply the same rubric standard to every essay. Score each
-  criterion in isolation to prevent halo bias.
-- Efficiency: the teacher's time is precious — save them hours, not minutes.
+## Pedagogical principles
+
+- Socratic method: ask questions that lead to insight. Never lecture.
+- Zone of Proximal Development (Vygotsky): find the boundary between
+  what they know and what they don't. Work right at that edge.
+- Productive struggle: let them wrestle with it. Intervene only when
+  they're stuck, not when they're thinking.
+- Minimal intervention: the smallest hint that unblocks progress.
+  "What happens to kinetic energy at the top of the arc?" not
+  "Energy is conserved, so mgh = ½mv²..."
+- Growth mindset: "You haven't connected these concepts yet" not
+  "You don't understand energy conservation."
+- One misconception at a time: fix the deepest one first. Surface
+  errors often vanish when the root misconception is resolved.
+
+## When NOT to use tools
+
+Simple questions ("what's Newton's second law?") don't need the
+diagnostic loop. Just answer directly. Save tool calls for moments
+when the student is genuinely stuck or has a misconception to debug.
 """
 
-RUBRIC_CRITERIA = [
-    "Thesis & Argument — clarity, specificity, defensibility of the central claim",
-    "Evidence & Support — relevance, quality, and integration of evidence",
-    "Organization & Structure — logical flow, transitions, paragraph cohesion",
-    "Language & Style — vocabulary, sentence variety, tone, grammar",
-    "Critical Thinking — depth of analysis, counterarguments, originality",
-]
+# --- Memory: per-student cognitive map ---
+cognitive_maps: dict[str, dict] = {}
 
-SAMPLE_ESSAYS = [
-    {
-        "student": "Alex M.",
-        "title": "Should School Start Later?",
-        "text": (
-            "I think school should start later because students are tired. "
-            "Many students stay up late doing homework and then have to wake up "
-            "at 6am. This is not good for their health. Studies show that "
-            "teenagers need 8-10 hours of sleep. If school started at 9am "
-            "instead of 7:30am, students would be more alert and learn better. "
-            "Some people say it would mess up parents' work schedules, but I "
-            "think student health is more important. In conclusion, schools "
-            "should start later so students can sleep more and do better."
-        ),
-    },
-    {
-        "student": "Jamie L.",
-        "title": "The Impact of Social Media on Teen Mental Health",
-        "text": (
-            "Social media has become an integral part of teenage life, with "
-            "over 95% of teens reporting access to a smartphone (Pew Research, "
-            "2023). While platforms like Instagram and TikTok offer connection "
-            "and creative expression, mounting evidence suggests a troubling "
-            "correlation between heavy social media use and declining mental "
-            "health among adolescents. This essay argues that schools must "
-            "implement digital literacy programs that teach students to engage "
-            "critically with social media rather than banning it outright.\n\n"
-            "The American Psychological Association's 2023 advisory highlights "
-            "that social media's effects are not uniform — they depend on the "
-            "individual's developmental stage, pre-existing vulnerabilities, "
-            "and usage patterns. For instance, passive scrolling correlates "
-            "with increased depression symptoms, while active engagement shows "
-            "neutral or mildly positive effects (Thorisdottir et al., 2019). "
-            "This nuance is critical: a blanket ban ignores that social media "
-            "can be a lifeline for marginalized teens who find community "
-            "online.\n\n"
-            "However, the counterargument that teens can self-regulate is "
-            "undermined by neuroscience. The prefrontal cortex, responsible "
-            "for impulse control, is not fully developed until the mid-20s "
-            "(Casey et al., 2008). Platforms engineered for engagement exploit "
-            "this vulnerability through variable-ratio reinforcement schedules "
-            "— the same mechanism that makes slot machines addictive. Schools "
-            "therefore have a duty to scaffold students' digital decision-"
-            "making.\n\n"
-            "A digital literacy curriculum should include: media analysis, "
-            "self-monitoring tools, and structured offline alternatives. Pilot "
-            "programs in Finland and Australia showed a 23% reduction in "
-            "problematic usage (OECD Education Working Paper, 2024).\n\n"
-            "The question is not whether teens will use social media — they "
-            "will. The question is whether we equip them to use it wisely."
-        ),
-    },
-    {
-        "student": "Sam K.",
-        "title": "Why Dogs Are the Best Pets",
-        "text": (
-            "Dogs are the best pets ever. They are loyal and fun. My dog Buddy "
-            "always greets me when I come home. He wags his tail and jumps on "
-            "me. Dogs are better than cats because cats are lazy and don't care "
-            "about you. Dogs can also do tricks like sit and roll over. My "
-            "neighbor has a cat and it just sleeps all day. Dogs are also good "
-            "for security because they bark at strangers. In conclusion dogs "
-            "are the best pets because they are loyal fun and protective."
-        ),
-    },
-]
+CONTEXT_SUMMARY_THRESHOLD = 20
 
+
+def _get_or_create_map(student_id: str = "default") -> dict:
+    if student_id not in cognitive_maps:
+        cognitive_maps[student_id] = {
+            "student_id": student_id,
+            "concepts": {},
+            "misconceptions": [],
+            "session_summary": "",
+        }
+    return cognitive_maps[student_id]
+
+
+def _summarize_history(client: anthropic.Anthropic, history: list[dict]) -> list[dict]:
+    """Compress old conversation turns to manage context window costs."""
+    if len(history) <= CONTEXT_SUMMARY_THRESHOLD:
+        return history
+
+    old_turns = history[:-6]
+    recent_turns = history[-6:]
+
+    summary_text = ""
+    for msg in old_turns:
+        if isinstance(msg.get("content"), str):
+            role = msg["role"]
+            summary_text += f"{role}: {msg['content'][:200]}\n"
+
+    resp = client.messages.create(
+        model=FAST_MODEL,
+        max_tokens=256,
+        system="Summarize this tutoring conversation in 3-4 sentences. Focus on: what topic, what misconceptions were found, what was resolved.",
+        messages=[{"role": "user", "content": summary_text}],
+    )
+    summary = resp.content[0].text
+
+    compressed = [
+        {"role": "user", "content": f"[Earlier conversation summary: {summary}]"},
+        {"role": "assistant", "content": "I have the context from our earlier discussion. Let's continue."},
+    ]
+    return compressed + recent_turns
+
+
+# --- Tool definitions ---
 TOOLS: list[dict] = [
     {
-        "name": "customize_rubric",
+        "name": "diagnose_misconception",
         "description": (
-            "Call this BEFORE grading if the teacher wants to use their own "
-            "rubric criteria instead of the default 5. Replaces the active "
-            "rubric for this session. Skip if the teacher is happy with the "
-            "default (Thesis, Evidence, Organization, Language, Critical Thinking)."
+            "Call when the student gives a wrong answer or shows confused "
+            "reasoning. This is the EXPENSIVE call — it uses Opus to reason "
+            "deeply about WHY the student thinks what they think. Returns a "
+            "structured hypothesis: the concept, the misconception type, "
+            "evidence from the student's words, and confidence level. "
+            "Use deliberately — once per misconception, not every turn."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "criteria": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "List of rubric criteria, each as a short phrase "
-                        "with description, e.g. 'Creativity — originality "
-                        "of ideas and approach'"
-                    ),
+                "student_work": {
+                    "type": "string",
+                    "description": "The student's answer, reasoning, or work that shows the error",
+                },
+                "problem_context": {
+                    "type": "string",
+                    "description": "The problem or topic being discussed",
+                },
+                "known_concepts": {
+                    "type": "string",
+                    "description": "What the student already understands (from cognitive map)",
                 },
             },
-            "required": ["criteria"],
+            "required": ["student_work", "problem_context"],
         },
     },
     {
-        "name": "load_essay_batch",
+        "name": "generate_probe",
         "description": (
-            "Call this FIRST when the teacher asks to grade essays. Loads the "
-            "student essays and rubric criteria from the class batch. In "
-            "production this connects to an LMS (Canvas, Google Classroom)."
+            "Call to generate a targeted diagnostic question that tests a "
+            "specific hypothesis about the student's misconception. Uses "
+            "Haiku (cheap — call freely). The question should discriminate: "
+            "if the student answers correctly, the hypothesis is wrong; if "
+            "they answer incorrectly in the predicted way, it's confirmed."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_name": {
+                "hypothesis": {
                     "type": "string",
-                    "description": "Name of the class or assignment",
+                    "description": "The misconception hypothesis to test",
+                },
+                "concept": {
+                    "type": "string",
+                    "description": "The concept area (e.g., 'energy conservation')",
+                },
+                "difficulty": {
+                    "type": "string",
+                    "enum": ["simpler", "same", "harder"],
+                    "description": "Relative to the original problem",
+                },
+            },
+            "required": ["hypothesis", "concept"],
+        },
+    },
+    {
+        "name": "update_cognitive_map",
+        "description": (
+            "Call to record what you've learned about the student's "
+            "understanding. NO API call — pure local memory update, zero "
+            "cost. Call after confirming a misconception, resolving one, "
+            "or discovering a mastered concept. This is the memory system."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "student_id": {
+                    "type": "string",
+                    "description": "Student identifier (default: 'default')",
+                },
+                "concept": {
+                    "type": "string",
+                    "description": "The concept being updated (e.g., 'energy conservation')",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["mastered", "misconception", "partial", "resolved"],
+                    "description": "mastered=understands, misconception=confirmed wrong model, partial=some understanding, resolved=previously misconceived now fixed",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Brief evidence for this assessment",
+                },
+                "misconception_detail": {
+                    "type": "string",
+                    "description": "If status=misconception, describe the specific wrong mental model",
+                },
+            },
+            "required": ["concept", "status", "evidence"],
+        },
+    },
+    {
+        "name": "get_cognitive_map",
+        "description": (
+            "Call to retrieve the student's full cognitive map — what they "
+            "know, what they misconceive, and what's been resolved. NO API "
+            "call, zero cost. Use this to tailor your approach: don't "
+            "re-diagnose resolved misconceptions, build on mastered concepts."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "student_id": {
+                    "type": "string",
+                    "description": "Student identifier (default: 'default')",
                 },
             },
             "required": [],
         },
     },
     {
-        "name": "score_rubric_criterion",
+        "name": "generate_scaffold",
         "description": (
-            "Score ONE essay on ONE rubric criterion. Delegates to Haiku "
-            "(fast, ~$0.001/call) so you can call it many times cheaply. "
-            "Call once per criterion per essay: 5 criteria × 3 essays = 15 "
-            "calls. Each criterion is scored in isolation to prevent halo bias."
+            "Call AFTER confirming a misconception to provide the MINIMAL "
+            "intervention. Uses Haiku (cheap). The scaffold should be the "
+            "smallest hint that unblocks progress — an analogy, a "
+            "counter-example, a pointed question. Never the full solution."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "student_name": {
+                "misconception": {
                     "type": "string",
-                    "description": "Name of the student",
+                    "description": "The confirmed misconception to address",
                 },
-                "essay_text": {
+                "concept": {
                     "type": "string",
-                    "description": "Full essay text",
+                    "description": "The concept area",
                 },
-                "criterion": {
+                "student_level": {
                     "type": "string",
-                    "description": "Rubric criterion to evaluate",
+                    "description": "What the student already understands (to avoid over-explaining)",
                 },
             },
-            "required": ["student_name", "essay_text", "criterion"],
+            "required": ["misconception", "concept"],
         },
     },
     {
-        "name": "generate_student_feedback",
+        "name": "verify_understanding",
         "description": (
-            "Call AFTER scoring all 5 criteria for one student. Compiles the "
-            "per-criterion scores into a personalized, constructive feedback "
-            "letter. Uses Haiku for cost — you (Opus) add holistic framing."
+            "Call AFTER scaffolding when the student tries again. Uses "
+            "Haiku (cheap). Checks whether the misconception is resolved "
+            "by analyzing the student's new response. Returns structured "
+            "verdict: resolved (bool), confidence, and suggested next step."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "student_name": {"type": "string"},
-                "essay_title": {"type": "string"},
-                "criterion_scores": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "criterion": {"type": "string"},
-                            "score": {"type": "integer"},
-                            "justification": {"type": "string"},
-                        },
-                    },
-                    "description": "Scores from score_rubric_criterion calls",
+                "original_misconception": {
+                    "type": "string",
+                    "description": "The misconception that was scaffolded",
+                },
+                "student_response": {
+                    "type": "string",
+                    "description": "The student's new answer or reasoning after scaffolding",
+                },
+                "expected_correct": {
+                    "type": "string",
+                    "description": "What a correct understanding would look like",
                 },
             },
-            "required": ["student_name", "essay_title", "criterion_scores"],
-        },
-    },
-    {
-        "name": "suggest_revision_focus",
-        "description": (
-            "Call AFTER generating feedback for a student. Analyzes their "
-            "scores to identify the ONE thing they should work on first. "
-            "Uses Haiku to produce a 2-sentence actionable priority. "
-            "Helps students avoid overwhelm by focusing on highest-leverage fix."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "student_name": {"type": "string"},
-                "essay_title": {"type": "string"},
-                "criterion_scores": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "criterion": {"type": "string"},
-                            "score": {"type": "integer"},
-                            "justification": {"type": "string"},
-                        },
-                    },
-                    "description": "Scores from the scoring step",
-                },
-            },
-            "required": ["student_name", "essay_title", "criterion_scores"],
-        },
-    },
-    {
-        "name": "export_grade_summary",
-        "description": (
-            "Call LAST, after all essays are graded and feedback generated. "
-            "Produces a class-wide summary: score distributions, common "
-            "weaknesses, and teaching recommendations. Helps the teacher "
-            "plan targeted instruction."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "class_name": {"type": "string"},
-                "grade_reports": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "student_name": {"type": "string"},
-                            "overall_score": {"type": "number"},
-                            "criterion_scores": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "criterion": {"type": "string"},
-                                        "score": {"type": "integer"},
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-            "required": ["class_name", "grade_reports"],
+            "required": ["original_misconception", "student_response"],
         },
     },
 ]
 
-grade_reports: dict[str, dict] = {}
-active_rubric: list[str] = list(RUBRIC_CRITERIA)
 
+def handle_tool(client: anthropic.Anthropic, name: str, args: dict) -> str:
+    # --- Diagnostician subagent (Opus) — the expensive, deep-reasoning call ---
+    if name == "diagnose_misconception":
+        resp = client.messages.create(
+            model=ORCHESTRATOR_MODEL,
+            max_tokens=512,
+            system=[{
+                "type": "text",
+                "text": (
+                    "You are an expert diagnostician of student misconceptions "
+                    "in STEM. Analyze the student's work and identify the ROOT "
+                    "misconception — not the surface error, but the underlying "
+                    "wrong mental model. Respond with ONLY a JSON object:\n"
+                    "{\n"
+                    '  "concept": "<the concept area>",\n'
+                    '  "misconception_type": "procedural|conceptual|factual",\n'
+                    '  "hypothesis": "<the specific wrong mental model>",\n'
+                    '  "evidence": "<quote from student work that reveals this>",\n'
+                    '  "confidence": <0.0-1.0>,\n'
+                    '  "probe_suggestion": "<a question to confirm this hypothesis>"\n'
+                    "}"
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }],
+            thinking={"type": "adaptive"},
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Student's work:\n{args['student_work']}\n\n"
+                    f"Problem context: {args['problem_context']}\n\n"
+                    f"Known concepts: {args.get('known_concepts', 'None yet')}"
+                ),
+            }],
+        )
+        text = resp.content[-1].text if resp.content else "{}"
+        return text
 
-def _parse_json_safe(text: str) -> dict:
-    """Extract JSON from Haiku responses that may include markdown fences."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        return {"score": 5, "justification": text}
+    # --- Probe Generator subagent (Haiku) — cheap diagnostic questions ---
+    if name == "generate_probe":
+        resp = client.messages.create(
+            model=FAST_MODEL,
+            max_tokens=256,
+            system=[{
+                "type": "text",
+                "text": (
+                    "Generate ONE short, targeted diagnostic question that "
+                    "tests whether a student has a specific misconception. "
+                    "The question should discriminate: a correct answer means "
+                    "the hypothesis is wrong; a specific wrong answer pattern "
+                    "confirms it. Return ONLY a JSON object:\n"
+                    '{"question": "<the probe question>", '
+                    '"confirms_if": "<what answer pattern confirms the misconception>", '
+                    '"refutes_if": "<what answer pattern refutes it>"}'
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Hypothesis: {args['hypothesis']}\n"
+                    f"Concept: {args['concept']}\n"
+                    f"Difficulty: {args.get('difficulty', 'same')}"
+                ),
+            }],
+        )
+        return resp.content[0].text
+
+    # --- Memory: update cognitive map (NO API call — zero cost) ---
+    if name == "update_cognitive_map":
+        student_id = args.get("student_id", "default")
+        cmap = _get_or_create_map(student_id)
+        concept = args["concept"]
+        status = args["status"]
+
+        cmap["concepts"][concept] = {
+            "status": status,
+            "evidence": args["evidence"],
+            "updated_at": time.strftime("%H:%M:%S"),
+        }
+
+        if status == "misconception":
+            cmap["misconceptions"].append({
+                "concept": concept,
+                "detail": args.get("misconception_detail", ""),
+                "resolved": False,
+                "attempts": 0,
+            })
+        elif status == "resolved":
+            for m in cmap["misconceptions"]:
+                if m["concept"] == concept and not m["resolved"]:
+                    m["resolved"] = True
+                    break
+
+        return json.dumps({
+            "status": "updated",
+            "concept": concept,
+            "new_status": status,
+            "total_concepts_tracked": len(cmap["concepts"]),
+            "active_misconceptions": sum(
+                1 for m in cmap["misconceptions"] if not m["resolved"]
+            ),
+        })
+
+    # --- Memory: read cognitive map (NO API call — zero cost) ---
+    if name == "get_cognitive_map":
+        student_id = args.get("student_id", "default")
+        cmap = _get_or_create_map(student_id)
+        return json.dumps(cmap, indent=2)
+
+    # --- Scaffolder subagent (Haiku) — minimal intervention ---
+    if name == "generate_scaffold":
+        resp = client.messages.create(
+            model=FAST_MODEL,
+            max_tokens=256,
+            system=[{
+                "type": "text",
+                "text": (
+                    "You are a Socratic tutor. Given a confirmed misconception, "
+                    "provide the MINIMAL scaffold to help the student see the "
+                    "error themselves. Use ONE of: a counter-example, an analogy, "
+                    "a leading question, or a thought experiment. NEVER give the "
+                    "answer directly. 2-3 sentences maximum."
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Misconception: {args['misconception']}\n"
+                    f"Concept: {args['concept']}\n"
+                    f"Student already understands: {args.get('student_level', 'unknown')}"
+                ),
+            }],
+        )
+        return resp.content[0].text
+
+    # --- Verifier subagent (Haiku) — check resolution ---
+    if name == "verify_understanding":
+        resp = client.messages.create(
+            model=FAST_MODEL,
+            max_tokens=256,
+            system=[{
+                "type": "text",
+                "text": (
+                    "Check whether a student's response shows that a specific "
+                    "misconception has been resolved. Return ONLY a JSON object:\n"
+                    '{"resolved": true/false, "confidence": <0.0-1.0>, '
+                    '"evidence": "<what in their response shows resolution or persistence>", '
+                    '"next_step": "<what to do next>"}'
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Misconception: {args['original_misconception']}\n"
+                    f"Student's new response: {args['student_response']}\n"
+                    f"Expected correct: {args.get('expected_correct', 'not specified')}"
+                ),
+            }],
+        )
+        return resp.content[0].text
+
+    return json.dumps({"error": f"Unknown tool: {name}"})
 
 
 def run() -> None:
     client = anthropic.Anthropic()
     history: list[dict] = []
+    turn_count = 0
 
-    print("\n─" * 58)
-    print("  GradeAssist — AI Essay Grading Agent")
-    print("  Grade a batch of essays with rubric-aligned feedback.")
-    print("  Type 'grade my essays' to start, or describe your task.")
-    print("─" * 58 + "\n")
+    print("\n" + "=" * 58)
+    print("  MisconceptionDebugger")
+    print("  I find where your understanding breaks — and fix it.")
+    print("  Describe a STEM problem you're stuck on.")
+    print("=" * 58 + "\n")
 
-    user = input("👩‍🏫 ").strip()
+    user = input("🧑‍🎓 ").strip()
     if not user:
         return
     history.append({"role": "user", "content": user})
 
     while True:
+        turn_count += 1
+
+        history = _summarize_history(client, history)
+
+        t0 = time.time()
         resp = client.messages.create(
             model=ORCHESTRATOR_MODEL,
             max_tokens=4096,
@@ -334,13 +500,27 @@ def run() -> None:
             thinking={"type": "adaptive"},
             messages=history,
         )
+        elapsed = time.time() - t0
+        tokens_in = resp.usage.input_tokens
+        tokens_out = resp.usage.output_tokens
+        print(
+            f"   [{elapsed:.1f}s | in:{tokens_in} out:{tokens_out} | "
+            f"model:{ORCHESTRATOR_MODEL}]",
+            file=sys.stderr,
+        )
+
         history.append({"role": "assistant", "content": resp.content})
 
         for block in resp.content:
             if block.type == "text":
                 print(f"\n🤖 {block.text}\n")
             elif block.type == "tool_use":
-                print(f"   ⚙️  {block.name}...")
+                model_tag = (
+                    "Opus" if block.name == "diagnose_misconception"
+                    else "local" if block.name in ("update_cognitive_map", "get_cognitive_map")
+                    else "Haiku"
+                )
+                print(f"   ⚙️  {block.name} [{model_tag}]...")
                 result = handle_tool(client, block.name, block.input)
                 history.append({
                     "role": "user",
@@ -352,134 +532,21 @@ def run() -> None:
                 })
 
         if resp.stop_reason != "tool_use":
-            user = input("👩‍🏫 ").strip()
+            user = input("🧑‍🎓 ").strip()
             if not user:
+                cmap = _get_or_create_map("default")
+                if cmap["concepts"]:
+                    print("\n📊 Session cognitive map:")
+                    for concept, data in cmap["concepts"].items():
+                        icon = {"mastered": "✅", "misconception": "❌",
+                                "partial": "🟡", "resolved": "🔄"}.get(data["status"], "?")
+                        print(f"   {icon} {concept}: {data['status']}")
+                    resolved = sum(1 for m in cmap["misconceptions"] if m["resolved"])
+                    total = len(cmap["misconceptions"])
+                    if total:
+                        print(f"\n   Misconceptions resolved: {resolved}/{total}")
                 return
             history.append({"role": "user", "content": user})
-
-
-def handle_tool(client: anthropic.Anthropic, name: str, args: dict) -> str:
-    if name == "customize_rubric":
-        active_rubric.clear()
-        active_rubric.extend(args["criteria"])
-        return json.dumps({
-            "status": "rubric_updated",
-            "criteria": active_rubric,
-            "count": len(active_rubric),
-        })
-
-    if name == "load_essay_batch":
-        return json.dumps({
-            "essays": [
-                {"student": e["student"], "title": e["title"], "text": e["text"]}
-                for e in SAMPLE_ESSAYS
-            ],
-            "count": len(SAMPLE_ESSAYS),
-            "rubric_criteria": active_rubric,
-            "note": "3 essays of varying quality for demonstration",
-        })
-
-    if name == "score_rubric_criterion":
-        resp = client.messages.create(
-            model=SCORER_MODEL,
-            max_tokens=256,
-            system=[{
-                "type": "text",
-                "text": (
-                    "You are a rubric scorer. Score the essay on the given "
-                    "criterion from 1–10. Respond with ONLY a JSON object:\n"
-                    '{"score": <int 1-10>, "justification": "<2 sentences, '
-                    'quote student text>"}'
-                ),
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Criterion: {args.get('criterion', args.get('rubric_criterion', 'General Quality'))}\n\n"
-                    f"Essay by {args.get('student_name', 'Unknown')}:\n{args.get('essay_text', '')}"
-                ),
-            }],
-        )
-        raw = resp.content[0].text
-        parsed = _parse_json_safe(raw)
-        return json.dumps(parsed)
-
-    if name == "generate_student_feedback":
-        resp = client.messages.create(
-            model=SCORER_MODEL,
-            max_tokens=1024,
-            system=[{
-                "type": "text",
-                "text": (
-                    "Write a short feedback letter (3 paragraphs) to the student. "
-                    "Start with strengths. Frame weaknesses as concrete next steps. "
-                    "Quote their text. Be warm but honest."
-                ),
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Student: {args['student_name']}\n"
-                    f"Essay: \"{args['essay_title']}\"\n"
-                    f"Scores:\n{json.dumps(args['criterion_scores'], indent=2)}"
-                ),
-            }],
-        )
-        feedback = resp.content[0].text
-        scores = args["criterion_scores"]
-        avg = sum(s.get("score", 0) for s in scores) / max(len(scores), 1)
-        grade_reports[args["student_name"]] = {
-            "overall_score": round(avg, 1),
-            "criterion_scores": scores,
-        }
-        return feedback
-
-    if name == "suggest_revision_focus":
-        resp = client.messages.create(
-            model=SCORER_MODEL,
-            max_tokens=256,
-            system=[{
-                "type": "text",
-                "text": (
-                    "You are a writing coach. Given a student's rubric scores, "
-                    "identify their SINGLE highest-leverage improvement. Respond "
-                    "in exactly 2 sentences: what to focus on and one concrete "
-                    "action they can take on their next draft. Use growth-mindset "
-                    "language ('yet', 'next step')."
-                ),
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Student: {args['student_name']}\n"
-                    f"Essay: \"{args['essay_title']}\"\n"
-                    f"Scores:\n{json.dumps(args['criterion_scores'], indent=2)}"
-                ),
-            }],
-        )
-        return resp.content[0].text
-
-    if name == "export_grade_summary":
-        reports = args.get("grade_reports", [])
-        if not reports:
-            return json.dumps({"error": "No reports provided"})
-        scores = [r["overall_score"] for r in reports]
-        return json.dumps({
-            "class": args.get("class_name", "Unknown"),
-            "students_graded": len(reports),
-            "average_score": round(sum(scores) / len(scores), 1),
-            "highest": max(scores),
-            "lowest": min(scores),
-            "per_student": [
-                {"student": r["student_name"], "score": r["overall_score"]}
-                for r in reports
-            ],
-        }, indent=2)
-
-    return f"(tool {name!r} not implemented)"
 
 
 if __name__ == "__main__":

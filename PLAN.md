@@ -1,86 +1,106 @@
-# GradeAssist — Strategy & Plan
+# MisconceptionDebugger — Strategy & Plan
 
-## The Problem We're Solving
+## What Went Wrong (v1: GradeAssist)
 
-Teachers spend 5+ hours/week grading essays. Students get generic, delayed feedback that doesn't help them improve. We're building an AI agent that grades a batch of essays with rubric-aligned, personalized feedback — saving teacher time while giving students better guidance.
+### Impact (~20/100)
+- Vague learner ("every student who submits writing")
+- Hardcoded sample essays — not a real tool, just a constant
+- Teacher-facing, not learner-facing. The student never interacts with the agent
+- No adaptive behavior
 
-## Target Learner
+### Architecture (~25/100)
+- No memory — agent forgets everything between turns
+- No subagent topology — one agent loop calling Haiku is a wrapper, not architecture
+- Thin tools: `load_essay_batch` returns a constant, `customize_rubric` swaps a list
+- No structured output — relied on `_parse_json_safe` hack
+- Redundant tools doing the same thing (Haiku summarizes scores)
 
-Any student who submits written work (essays, reports, reflections) and currently receives only a letter grade or a one-line comment like "good job."
+### Economics (~20/100)
+- Calculated costs in PITCH.md but code implements zero optimization
+- Unbounded context window — `history` grows forever
+- Full essay text sent 5× per essay (once per criterion)
+- No model routing logic — always same model for same task
 
-## Architecture Strategy
+### Ambition (~10/100)
+- Essay grading is the #1 most common AI+education demo. Zero novelty
+- Better models → slightly better scores (linear, not exponential)
+- No theory of mind — agent doesn't reason about WHY
+- No forward-looking architecture
 
-### Dual-Model Design (the core insight)
+---
 
-| Model | Role | Cost | Why |
-|-------|------|------|-----|
-| **Opus** | Orchestrator — manages the grading workflow, applies Bloom's Taxonomy + growth-mindset framing, coordinates all 6 tools | ~$0.10/batch | Needs deep reasoning to coordinate tools and synthesize holistic commentary |
-| **Haiku** | Scorer + feedback writer — evaluates each rubric criterion independently, generates feedback letters and revision priorities | ~$0.001/call | Fast, cheap, and isolated scoring prevents halo bias (one criterion doesn't influence another) |
+## The Fix: Adaptive Misconception Debugger
 
-### Tool Pipeline (6 tools, strict ordering)
+### Core Concept
+A "debugger for student thinking." Like a code debugger finds the exact line where code breaks, this finds the exact concept where understanding breaks.
 
-1. **`customize_rubric`** *(optional)* — Teacher sets custom rubric criteria. Skipped if the default 5-criterion rubric fits. Supports any assignment type.
-2. **`load_essay_batch`** — Load essays from the class (simulates LMS integration: Canvas, Google Classroom).
-3. **`score_rubric_criterion`** — Score ONE essay on ONE criterion via Haiku. Called N× per essay (one per rubric dimension). Isolated calls prevent halo bias.
-4. **`generate_student_feedback`** — Compile all criterion scores into a personalized feedback letter. Quotes the student's text, frames weaknesses as concrete next steps using growth-mindset language.
-5. **`suggest_revision_focus`** — Distills scores into ONE actionable priority per student. Prevents overwhelm by focusing on the highest-leverage improvement.
-6. **`export_grade_summary`** — Class-wide summary: score distributions, common weaknesses, teaching recommendations for targeted instruction.
+### Specific Learner
+University STEM students who get wrong answers but don't know WHERE their reasoning went wrong. Underserved because lectures can't personalize, TAs have 200 students each, and textbook answers show the right path but not where the student's path diverged.
 
-### Pedagogical Framework (baked into the system prompt)
+### Subagent Topology
 
-- **Bloom's Taxonomy** — identify which cognitive level the student operates at, nudge them one level up
-- **Growth mindset** — "yet" language ("Your thesis doesn't have specific evidence *yet*")
-- **Specificity** — quote the student's own words when praising or critiquing
-- **Fairness** — same rubric standard for every essay, isolated criterion scoring
+```
+Orchestrator (Opus) — manages the diagnostic loop
+  ├── Diagnostician (Opus)  — reasons about WHY the student is wrong
+  ├── Probe Generator (Haiku) — generates targeted diagnostic questions
+  ├── Scaffolder (Haiku)    — creates minimal interventions
+  └── Verifier (Haiku)      — checks if misconception was resolved
+  
+Memory (local, zero-cost):
+  ├── update_cognitive_map  — record what's learned about the student
+  └── get_cognitive_map     — read full knowledge state
+```
 
-### Default Rubric Dimensions
+### Tool Pipeline (diagnostic LOOP, not linear)
 
-1. Thesis & Argument
-2. Evidence & Support
-3. Organization & Structure
-4. Language & Style
-5. Critical Thinking
+| Tool | Model | Cost | Purpose |
+|------|-------|------|---------|
+| `diagnose_misconception` | Opus | ~$0.03 | Deep reasoning about student's wrong mental model |
+| `generate_probe` | Haiku | ~$0.001 | Targeted question to confirm/refute hypothesis |
+| `update_cognitive_map` | None (local) | $0 | Persist knowledge state — the memory system |
+| `get_cognitive_map` | None (local) | $0 | Read student's full cognitive map |
+| `generate_scaffold` | Haiku | ~$0.001 | Minimal intervention — analogy, counter-example, leading question |
+| `verify_understanding` | Haiku | ~$0.001 | Check if misconception was resolved |
 
-### Robustness
+### Memory System
+```python
+cognitive_maps = {
+    "student_id": {
+        "concepts": {
+            "energy_conservation": {"status": "mastered", "evidence": "...", "updated_at": "..."},
+            "vector_decomposition": {"status": "misconception", "evidence": "...", "updated_at": "..."},
+        },
+        "misconceptions": [
+            {"concept": "vector_decomposition", "detail": "confuses magnitude with component", "resolved": False}
+        ],
+        "session_summary": "..."
+    }
+}
+```
 
-- `_parse_json_safe()` handles Haiku responses wrapped in markdown fences or malformed JSON — graceful fallback instead of crash.
-- Prompt caching (`cache_control: ephemeral`) on all system prompts across both models.
+### Context Management (Economics)
+- `_summarize_history()`: After 20 turns, compresses old conversation via Haiku summary. Saves ~80% of context tokens
+- Cognitive map is ~200 tokens of structured data vs ~2000+ of raw conversation
+- Haiku calls capped at `max_tokens=256` — probes and verification don't need more
+- Token usage printed per turn (stderr) for cost monitoring
 
-## Economics (how it scales to 1M students)
+### Pedagogical Framework
+- **Socratic method**: questions, not lectures
+- **Zone of Proximal Development** (Vygotsky): find the boundary of understanding
+- **Productive struggle**: intervene only when truly stuck
+- **Minimal intervention**: smallest hint that unblocks progress
+- **Growth mindset**: "haven't connected yet" not "don't understand"
+- **One misconception at a time**: fix the deepest root cause first
 
-- 30 essays × 5 criteria = 150 Haiku calls → **$0.15**
-- 30 feedback letters (Haiku) → **$0.06**
-- 30 revision focus calls (Haiku) → **$0.03**
-- 1 Opus orchestration → **$0.10**
-- **Total: ~$0.34/class, ~1¢ per student**
-- Batches API cuts async grading by 50%
-- Prompt caching keeps system prompts near-free across turns
+### Why This Gets Disproportionately Better With Smarter Models
+- Misconception detection requires **theory of mind** — reasoning about WHY someone thinks what they think
+- Today: catches surface errors (wrong formula, sign error)
+- Smarter models: catches deep structural misunderstandings (confused causality, wrong analogies, missing connections between concepts)
+- This is exponential because each improvement in reasoning-about-reasoning unlocks a new tier of misconceptions that couldn't be detected before
+- Multi-modal future: analyze handwritten work, diagrams, lab photos
 
-## Why This Gets Better With Smarter Models
-
-- Better models → more nuanced feedback (catching subtle logical gaps, style issues)
-- Better models → cross-essay pattern detection (class-wide misconceptions)
-- Better models → real-time writing coaching (not just post-hoc grading)
-- Better models → multi-modal grading (handwritten essays via vision)
-- Better models → deeper Bloom's Taxonomy analysis (recognizing implicit reasoning)
-
-## What We Built
-
-- [x] Dual-model agent with Opus orchestration + Haiku scoring
-- [x] 6 well-designed tools with clear "when to call" descriptions
-- [x] Custom rubric support (`customize_rubric` tool)
-- [x] Per-student revision priorities (`suggest_revision_focus` tool)
-- [x] Bloom's Taxonomy + growth-mindset pedagogical framework
-- [x] Robust JSON parsing for Haiku responses
-- [x] Prompt caching on all system prompts
-- [x] 3 sample essays of varying quality for demonstration
-- [x] PITCH.md under 150 words
-
-## What We'd Add With More Time
-
-- LMS integration (Canvas API, Google Classroom API)
-- Parallel scoring with `asyncio` (score all criteria simultaneously)
-- Student progress tracking across assignments (memory)
-- Plagiarism detection as an additional tool
-- Batch API integration for overnight grading of large classes
-- Multi-modal support (grading handwritten essays via vision)
+### Economics at Scale
+- 1 Opus diagnosis + 4 Haiku calls = ~$0.035/session
+- At 1M students: ~$35K/month
+- Context summarization reduces long-session costs by ~80%
+- Cognitive maps enable session-to-session continuity without replaying full history

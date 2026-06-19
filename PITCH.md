@@ -1,10 +1,10 @@
 # Team: I-me-myself
 
 ## Problem
-Teachers spend 5+ hours/week grading essays. Students get vague feedback too late to act on. The learner: every student who submits writing and deserves specific, growth-oriented guidance — not just a letter grade.
+University STEM students get wrong answers but don't know WHERE their reasoning broke. Lectures can't personalize, TAs have 200 students each, and textbooks show the right path — not where the student's path diverged. The learner: any STEM student stuck on a problem with no one to diagnose their specific confusion.
 
 ## Approach
-GradeAssist uses a **dual-model architecture**. Opus orchestrates the workflow using Bloom's Taxonomy and growth-mindset framing; Haiku scores each rubric criterion independently to prevent halo bias (~$0.001/call). Six tools form a pipeline: `customize_rubric` lets teachers set criteria, `score_rubric_criterion` calls Haiku per-criterion, `generate_student_feedback` compiles personalized letters quoting the student's own words, and `suggest_revision_focus` distills one actionable priority per student. Prompt caching keeps system-prompt costs near zero.
+MisconceptionDebugger is a **cognitive debugger** — it finds the exact concept where understanding breaks, then provides the minimal fix. A diagnostic loop (not a pipeline): `diagnose_misconception` calls Opus to reason about the student's thinking, `generate_probe` (Haiku) creates targeted questions to confirm the hypothesis, `update_cognitive_map` tracks knowledge state as persistent memory (zero-cost local calls), and `generate_scaffold` (Haiku) delivers the smallest hint that unblocks progress. Socratic method throughout — never gives answers.
 
 ## Why it scales
-30 essays × 5 criteria = 150 Haiku calls ($0.15) + 30 feedback letters ($0.06) + 1 Opus call ($0.10) = **$0.31/class, ~1 cent/student**. Batches API halves async costs. At 1M students: ~$10K/month — less than one TA.
+Opus fires once per misconception (~$0.03). Everything else is Haiku (~$0.001/call). Typical session: 1 Opus diagnosis + 4 Haiku calls = **~$0.035/session, ~3.5 cents/student**. Context summarization compresses old turns after 20 messages, cutting token costs ~80%. Cognitive maps are ~200 tokens of structured data vs ~2000+ of raw history.
